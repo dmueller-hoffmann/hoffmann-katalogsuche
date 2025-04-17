@@ -4,18 +4,18 @@ import pandas as pd
 import urllib.parse
 
 st.set_page_config(page_title="Katalogsuche – Hoffmann Verpackung", layout="wide")
-
-st.markdown(
-    "<div style='background-color:#00549F; color:white; padding:4px 10px; font-size:8pt; text-align:left;'>"
-    "Stand April 2025 / Katalog 2024 – Rückfragen an dmueller@hoffmann-verpackung.de"
-    "</div>",
-    unsafe_allow_html=True
-)
-
+from datetime import datetime, date
+heute = datetime.now().strftime("%A, %d. %B %Y")
+weihnachten = date(datetime.now().year, 12, 24)
+tage_bis_weihnachten = (weihnachten - date.today()).days
+if tage_bis_weihnachten < 0:
+    weihnachten = date(datetime.now().year + 1, 12, 24)
+    tage_bis_weihnachten = (weihnachten - date.today()).days
+st.markdown(f"""<div style='font-size:10pt; padding:2px 0 6px 0; color:#00549F; font-weight:bold;'>📅 Heute ist <b>{heute}</b> – noch <b>{tage_bis_weihnachten}</b> Tage bis Weihnachten 🎄</div>""", unsafe_allow_html=True)
 
 # Logo
 st.markdown(
-    '<a href="https://www.hoffmann-verpackung.de" target="_blank"><img src="https://www.hoffmann-verpackung.de/media/vector/17/59/b3/Hoffmann_Logo.svg" width="300" style="float:left;"/></a>',
+    '<img src="https://www.hoffmann-verpackung.de/media/vector/17/59/b3/Hoffmann_Logo.svg" width="300"/>',
     unsafe_allow_html=True
 )
 
@@ -39,9 +39,6 @@ st.markdown("""
     }
     table td, table th {
         text-align: center !important;
-    }
-    .stNumberInput input {
-        max-width: 100px !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -80,14 +77,6 @@ if submit:
     ].sort_values(by="Ähnlichkeit (%)", ascending=False)
 
 if not df_result.empty:
-    st.markdown("""
-<style>
-table.dataframe tbody tr:nth-child(even) {
-    background-color: #f2f2f2;
-}
-</style>
-""", unsafe_allow_html=True)
-
     st.markdown(f"### ✅ {len(df_result)} passende Verpackungen gefunden:")
     df_result["zum Katalog"] = df_result["Seite"].apply(
         lambda s: make_link("zum Katalog", f"{pdf_url}#page={int(float(s))}") if pd.notna(s) and str(s).replace('.0','').isdigit() else "-"
