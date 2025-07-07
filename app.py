@@ -1,117 +1,227 @@
-# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
-import urllib.parse
+import os
 
-st.set_page_config(page_title="Katalogsuche – Hoffmann Verpackung", layout="wide")
-from datetime import datetime, date
-heute = datetime.now().strftime("%A, %d. %B %Y")
-weihnachten = date(datetime.now().year, 12, 24)
-tage_bis_weihnachten = (weihnachten - date.today()).days
-if tage_bis_weihnachten < 0:
-    weihnachten = date(datetime.now().year + 1, 12, 24)
-    tage_bis_weihnachten = (weihnachten - date.today()).days
-st.markdown(f"""<div style='font-size:10pt; padding:2px 0 6px 0; color:#00549F; font-weight:bold;'>📅 Heute ist <b>{heute}</b> – noch <b>{tage_bis_weihnachten}</b> Tage bis Weihnachten 🎄</div>""", unsafe_allow_html=True)
+# --- Passwortschutz (vor dem Rest der App!) ---
+def check_password():
+    def password_entered():
+        if st.session_state["pw"] == "karton2025":
+            st.session_state["pw_correct"] = True
+            del st.session_state["pw"]  # optional: entfernt das PW aus dem Session State
+        else:
+            st.session_state["pw_correct"] = False
 
-# Logo
+    if "pw_correct" not in st.session_state:
+        st.text_input("Passwort", type="password", on_change=password_entered, key="pw")
+        st.stop()
+    elif not st.session_state["pw_correct"]:
+        st.text_input("Passwort", type="password", on_change=password_entered, key="pw")
+        st.error("Falsches Passwort")
+        st.stop()
+
+check_password()
+
+st.set_page_config(page_title="Kartons im Katalog und im Internet", layout="wide")
+
+# Logo oben rechts, 300px breit
 st.markdown(
-    '<img src="https://www.hoffmann-verpackung.de/media/vector/17/59/b3/Hoffmann_Logo.svg" width="300"/>',
+    """
+    <div style="width:100%; display: flex; justify-content: flex-end;">
+        <img src="https://www.hoffmann-verpackung.de/media/vector/17/59/b3/Hoffmann_Logo.svg" width="300" />
+    </div>
+    """,
     unsafe_allow_html=True
 )
 
-st.markdown("## 📦 Kartonsuche im Hauptkatalog")
+st.title("Kartons im Katalog und im Internet")
 
-# Daten laden
-df = pd.read_csv("karton_lookup.csv")
-pdf_url = "https://www.hoffmann-verpackung.de/media/pdf/3d/56/10/Hoffmann-Verpackung-Hauptkatalog.pdf"
-toleranz = 0.3
+EXCEL_PATH = "karton.xlsx"
 
-# Style
+def load_catalog_excel(filepath):
+    if not os.path.exists(filepath):
+        st.error(f"Die Datei {filepath} wurde nicht gefunden.")
+        st.stop()
+    df = pd.read_excel(filepath)
+    return df
+
+def filter_boxes(df, length, width, height, tolerance):
+    matches = []
+    tol_values = []
+    for _, row in df.iterrows():
+        karton_l = row['Länge']
+        karton_b = row['Breite']
+        karton_h = row['Höhe']
+        tolerance_factor = 1 + tolerance / 100.0
+        abweichungen = [
+            abs(karton_l - length) / max(1, length) * 100,
+            abs(karton_b - width) / max(1, width) * 100,
+            abs(karton_h - height) / max(1, height) * 100
+        ]
+        maxabweichung = max(abweichungen)
+        if (karton_l >= length and karton_b >= width and karton_h >= height and
+            karton_l <= length * tolerance_factor and karton_b <= width * tolerance_factor and karton_h <= height * tolerance_factor):
+            matches.append(row)
+            tol_values.append(round(maxabweichung, 2))
+    if matches:
+        df_res = pd.DataFrame(matches)
+        df_res["%"] = tol_values
+        df_res = df_res.sort_values("%", ascending=True, ignore_index=True)
+        return df_res
+    else:
+        return pd.DataFrame(columns=df.columns.tolist() + ["%"])
+
+def create_link(url, text):
+    if pd.isna(url) or not str(url).startswith("http"):
+        return ""
+    return f'<a href="{url}" target="_blank">{text}</a>'
+
+def create_directlink(nr):
+    if pd.isna(nr):
+        return ""
+    url = f"https://www.hoffmann-verpackung.de/search?sSearch={nr}"
+    return f'<a href="{url}" target="_blank">Direktlink</a>'
+
+def enrich_links(df):
+    df = df.copy()
+    if "KATALOG" in df.columns and "Katalogseite" not in df.columns:
+        df["Katalogseite"] = df["KATALOG"].apply(lambda url: create_link(url, "zur Katalogseite"))
+    elif "Katalog-URL" in df.columns and "Katalogseite" not in df.columns:
+        df["Katalogseite"] = df["Katalog-URL"].apply(lambda url: create_link(url, "zur Katalogseite"))
+    if "URL" in df.columns and "Webshop" not in df.columns:
+        df["Webshop"] = df["URL"].apply(lambda url: create_link(url, "zum Webshop"))
+    if "Nr." in df.columns and "Direktlink" not in df.columns:
+        df["Direktlink"] = df["Nr."].apply(create_directlink)
+    if "KATALOG" in df.columns:
+        df = df.drop(columns=["KATALOG"])
+    return df
+
+def format_int_columns(df):
+    df = df.copy()
+    for col in ["Länge", "Breite", "Höhe", "Seite"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+    return df
+
+# --- CSS für Tabellen-Layout und Toleranzfeld ---
 st.markdown("""
     <style>
-    .stTextInput input {
-        width: 6em !important;
+    .centered-wrapper {
+        display: flex;
+        justify-content: center;
+        margin: 0;
+        width: 100%;
     }
-    .stButton > button {
-        background-color: #00549F;
-        color: white;
-        font-weight: bold;
+    .table-80 {
+        width: 80vw !important;
+        margin: 0 auto;
     }
-    table td, table th {
+    .table-80 table {
+        width: 100% !important;
+        table-layout: auto !important;
+        white-space: nowrap;
+        border-collapse: collapse;
+        margin: 0 auto;
+    }
+    .table-80 th, .headline-blue {
         text-align: center !important;
+        vertical-align: middle !important;
+        background: #f0f0ff;
+        font-weight: bold;
+        font-size: 18px !important;
+        color: #003366 !important;
+    }
+    .search-results tr:nth-child(even) {
+        background-color: #e6ffe6 !important;
+    }
+    .search-results tr:nth-child(odd) {
+        background-color: white !important;
+    }
+    .karton-table tr:nth-child(even) {
+        background-color: #e6f0ff !important;
+    }
+    .karton-table tr:nth-child(odd) {
+        background-color: white !important;
+    }
+    .toleranz-div {
+        width: 10vw !important;
+        min-width: 100px;
+        display: block;
+        margin-top: 8px;
+        margin-bottom: 0.5rem;
     }
     </style>
 """, unsafe_allow_html=True)
 
-# Eingabe
-with st.form(key="suche_form", clear_on_submit=False):
-    col1, col2, col3 = st.columns([1, 1, 1])
-    l_input = col1.text_input("Länge", max_chars=4)
-    b_input = col2.text_input("Breite", max_chars=4)
-    h_input = col3.text_input("Höhe", max_chars=4)
-    submit = st.form_submit_button("Suchen")
+df = load_catalog_excel(EXCEL_PATH)
+df = enrich_links(df)
+df = format_int_columns(df)
 
-def make_link(text, url):
-    return f'<a href="{url}" target="_blank">{text}</a>'
+spalten = df.columns.tolist()
 
-df_result = pd.DataFrame()
+if "run_search" not in st.session_state:
+    st.session_state["run_search"] = True
 
-if submit:
-    l, b, h = int(l_input), int(b_input), int(h_input)
-    st.write("Eingegeben:", l, b, h)
+if "toleranz" not in st.session_state:
+    st.session_state["toleranz"] = 50
 
-    def berechne_ähnlichkeit(row):
-        try:
-            abw_l = abs(l - row['Länge']) / l if l else 1
-            abw_b = abs(b - row['Breite']) / b if b else 1
-            abw_h = abs(h - row['Höhe']) / h if h else 1
-            return round((1 - min((abw_l + abw_b + abw_h) / 3, 1)) * 100)
-        except:
-            return 0
+def trigger_search():
+    st.session_state["run_search"] = True
 
-    df["Ähnlichkeit (%)"] = df.apply(berechne_ähnlichkeit, axis=1)
-    df_result = df[
-        (abs(df["Länge"] - l) / l <= toleranz) &
-        (abs(df["Breite"] - b) / b <= toleranz) &
-        (abs(df["Höhe"] - h) / h <= toleranz)
-    ].sort_values(by="Ähnlichkeit (%)", ascending=False)
+# --- Eingabefelder ---
+st.header("Kartonmaße eingeben")
+col1, col2, col3 = st.columns(3)
+with col1:
+    length = st.number_input("Länge (mm)", min_value=0, value=300, key="length", on_change=trigger_search)
+with col2:
+    width = st.number_input("Breite (mm)", min_value=0, value=300, key="width", on_change=trigger_search)
+with col3:
+    height = st.number_input("Höhe (mm)", min_value=0, value=300, key="height", on_change=trigger_search)
 
-if not df_result.empty:
-    st.markdown(f"### ✅ {len(df_result)} passende Verpackungen gefunden:")
-    df_result["zum Katalog"] = df_result["Seite"].apply(
-        lambda s: make_link("zum Katalog", f"{pdf_url}#page={int(float(s))}") if pd.notna(s) and str(s).replace('.0','').isdigit() else "-"
-    )
-    df_result["Google"] = df_result["Nr."].apply(
-        lambda a: make_link("Google", f"https://www.google.com/search?q={urllib.parse.quote(str(a))}+Hoffmann+Verpackung") if pd.notna(a) else "-"
-    )
-    df_result = df_result.rename(columns={"Nr.": "Artikelnummer"})
-    df_result["Länge"] = df_result["Länge"].fillna(0).astype(int)
-    df_result["Breite"] = df_result["Breite"].fillna(0).astype(int)
-    df_result["Höhe"] = df_result["Höhe"].fillna(0).astype(int)
-    df_result["Seite"] = df_result["Seite"].fillna(0).astype(int)
-
-    st.write(
-        df_result[["Artikelnummer", "Beschreibung", "Länge", "Breite", "Höhe", "Qualität", "Seite",
-                   "Ähnlichkeit (%)", "zum Katalog", "Google"]]
-        .to_html(escape=False, index=False), unsafe_allow_html=True
-    )
-elif submit:
-    st.info("Keine passenden Artikel gefunden.")
-
-# Gesamtliste
-st.markdown("### 📋 Gesamte Artikelliste")
-df["zum Katalog"] = df["Seite"].apply(
-    lambda s: make_link("zum Katalog", f"{pdf_url}#page={int(float(s))}") if pd.notna(s) and str(s).replace('.0','').isdigit() else "-"
+# Toleranzfeld unter die drei Abmessungen, 10% Breite
+st.markdown('<div class="toleranz-div">', unsafe_allow_html=True)
+tolerance = st.number_input(
+    "Toleranz (%)", min_value=0, max_value=100,
+    value=st.session_state["toleranz"], key="toleranz",
+    help="Abweichung in %", step=1, on_change=trigger_search
 )
-df["Google"] = df["Nr."].apply(
-    lambda a: make_link("Google", f"https://www.google.com/search?q={urllib.parse.quote(str(a))}+Hoffmann+Verpackung") if pd.notna(a) else "-"
-)
-df = df.rename(columns={"Nr.": "Artikelnummer"})
-df["Länge"] = df["Länge"].fillna(0).astype(int)
-df["Breite"] = df["Breite"].fillna(0).astype(int)
-df["Höhe"] = df["Höhe"].fillna(0).astype(int)
-df["Seite"] = df["Seite"].fillna(0).astype(int)
-st.write(
-    df[["Artikelnummer", "Beschreibung", "Länge", "Breite", "Höhe", "Qualität", "Seite",
-        "zum Katalog", "Google"]].to_html(escape=False, index=False), unsafe_allow_html=True
+st.markdown('</div>', unsafe_allow_html=True)
+
+st.write(f"Aktuelle Toleranz: {st.session_state['toleranz']}%")
+
+if st.button("Suchen"):
+    st.session_state["run_search"] = True
+
+if st.session_state["run_search"]:
+    results = filter_boxes(
+        df,
+        st.session_state["length"],
+        st.session_state["width"],
+        st.session_state["height"],
+        st.session_state["toleranz"]
+    )
+    results = enrich_links(results)
+    results = format_int_columns(results)
+    treffer = len(results)
+    if "%" in results.columns:
+        ordered_cols = [col for col in spalten if col in results.columns] + ["%"]
+        results = results[ordered_cols]
+    if not results.empty:
+        st.markdown(
+            f"<div class='headline-blue' style='text-align:center;margin-bottom:10px'>{treffer} Ergebnis{'se' if treffer != 1 else ''} gefunden</div>",
+            unsafe_allow_html=True
+        )
+        st.markdown(
+            f'<div class="centered-wrapper"><div class="table-80 search-results">{results.to_html(escape=False, index=False, classes="table-80 search-results")}</div></div>',
+            unsafe_allow_html=True
+        )
+    else:
+        st.warning("Keine passenden Kartons gefunden.")
+    st.session_state["run_search"] = False
+
+st.markdown("<div style='height:15px'></div>", unsafe_allow_html=True)  # etwas Abstand
+
+st.subheader("Alle verfügbaren Kartons")
+st.markdown(
+    f'<div class="centered-wrapper"><div class="table-80 karton-table">{df.to_html(escape=False, index=False, classes="table-80 karton-table")}</div></div>',
+    unsafe_allow_html=True
 )
